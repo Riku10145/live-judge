@@ -80,12 +80,12 @@ export async function judgeText(text: string, signal?: AbortSignal): Promise<Jud
   return parseJudgeResponse(data);
 }
 
-export function parseCriteriaResponse(data: unknown): CriterionMeta[] {
+function parseCriteriaResponse(data: unknown): CriterionMeta[] {
   const rec = asRecord(data);
   return asArray(rec.criteria).map((item) => parseMeta(item));
 }
 
-export function parseJudgeResponse(data: unknown): JudgeResponse {
+function parseJudgeResponse(data: unknown): JudgeResponse {
   const rec = asRecord(data);
   const source = rec.source;
   if (source !== "live" && source !== "demo") malformed();

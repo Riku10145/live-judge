@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.5.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Check the Rust server
+        working-directory: server
+        run: |
+          cargo fmt --check
+          cargo clippy --locked -- -D warnings
+          cargo test --locked
+
+      - name: Build the Vite+ board
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Audit TypeScript with Fallow
+        run: npx --yes fallow audit --base origin/main web
+
+      - name: Drive the HTTP judge path
+        run: node scripts/verify.mjs

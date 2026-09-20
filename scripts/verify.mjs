@@ -74,7 +74,6 @@ function killChildren() {
     try {
       child.kill('SIGTERM');
     } catch {
-      // already gone
     }
   }
 }
@@ -115,7 +114,6 @@ async function waitForHealth(port, child, timeoutMs = 20000) {
         }
       }
     } catch {
-      // not listening yet
     }
     await delay(50);
   }
@@ -140,7 +138,6 @@ async function waitForStub(port, child, timeoutMs = 10000) {
         return;
       }
     } catch {
-      // not listening yet
     }
     await delay(50);
   }

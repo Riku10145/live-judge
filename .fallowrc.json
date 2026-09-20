@@ -1,0 +1,6 @@
+{
+  "ignorePatterns": ["scripts/**", "server/**"],
+  "health": {
+    "maxCrap": 0
+  }
+}
