@@ -22,7 +22,7 @@ jobs:
         with:
           node-version: "22"
           cache: true
-      - run: vp install
+          working-directory: web
       - run: vp check
       - run: vp test
       - run: vp build
@@ -71,8 +71,7 @@ jobs:
         with:
           node-version: "22"
           cache: true
-      - run: vp install
-        working-directory: web
+          working-directory: web
       # Runs from the repository root scoped to web/, because web/package.json
       # pins pnpm through devEngines and npx refuses to run under that pin.
       - run: npx --yes fallow@3 audit web

@@ -77,12 +77,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_missing_named_path_falls_back_to_the_crate_relative_build() {
-        let resolved = resolve_web_dist(Some("web/dist".into()));
-        if PathBuf::from("web/dist").is_dir() {
-            assert_eq!(resolved, PathBuf::from("web/dist"));
-        } else {
+    fn a_missing_named_path_falls_back_only_when_the_crate_build_exists() {
+        let missing =
+            std::env::temp_dir().join(format!("live-judge-absent-web-dist-{}", std::process::id()));
+        assert!(
+            !missing.exists(),
+            "precondition: {missing:?} must not exist"
+        );
+        let resolved = resolve_web_dist(Some(missing.to_string_lossy().into_owned()));
+        if crate_web_dist().is_dir() {
             assert_eq!(resolved, crate_web_dist());
+        } else {
+            assert_eq!(resolved, missing);
         }
     }
 
