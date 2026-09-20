@@ -1,48 +1,80 @@
-name: ci
+name: CI
 
 on:
-  pull_request:
   push:
     branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  verify:
+  web:
+    name: web (Vite+)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
+      - uses: voidzero-dev/setup-vp@v1.21.0
         with:
-          fetch-depth: 0
+          node-version: "22"
+          cache: true
+      - run: vp install
+      - run: vp check
+      - run: vp test
+      - run: vp build
 
+  server:
+    name: server (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
           components: rustfmt, clippy
-
-      - uses: pnpm/action-setup@v4
+      - uses: Swatinem/rust-cache@v2.9.2
         with:
-          version: 12.5.1
+          workspaces: server
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
 
-      - uses: actions/setup-node@v4
+  verify:
+    name: verify (stub gateway)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: server
+      - run: node scripts/verify.mjs
+
+  audit:
+    name: audit (fallow)
+    runs-on: ubuntu-latest
+    steps:
+      # fallow resolves the audit base through a merge-base, so it needs history.
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: voidzero-dev/setup-vp@v1.21.0
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: web/pnpm-lock.yaml
-
-      - name: Check the Rust server
-        working-directory: server
-        run: |
-          cargo fmt --check
-          cargo clippy --locked -- -D warnings
-          cargo test --locked
-
-      - name: Build the Vite+ board
+          cache: true
+      - run: vp install
         working-directory: web
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm build
-
-      - name: Audit TypeScript with Fallow
-        run: npx --yes fallow audit --base origin/main web
-
-      - name: Drive the HTTP judge path
-        run: node scripts/verify.mjs
+      # Runs from the repository root scoped to web/, because web/package.json
+      # pins pnpm through devEngines and npx refuses to run under that pin.
+      - run: npx --yes fallow@3 audit web
+        env:
+          FALLOW_AUDIT_BASE: origin/${{ github.event.pull_request.base.ref || 'main' }}

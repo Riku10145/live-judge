@@ -1,341 +1,263 @@
-import { spawn, spawnSync } from 'node:child_process';
-import net from 'node:net';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+// End-to-end check of the Rust server against a stub AI Gateway.
+//
+//   node scripts/verify.mjs
+//
+// Proves the live request path (server -> gateway -> typed verdicts) and the
+// demo path, without a real API key. Exits non-zero on the first failure.
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const serverDir = path.join(root, 'server');
-const stubPath = path.join(root, 'scripts', 'stub-gateway.mjs');
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const STUB_PORT = 8799;
+const SERVER_PORT = 8788;
+const BASE = `http://127.0.0.1:${SERVER_PORT}`;
+const SAMPLE = "このセット、本当に最高だった！";
+
+let failures = 0;
+let checks = 0;
+
+function check(label, condition, detail) {
+  checks += 1;
+  if (condition) {
+    process.stdout.write(`  pass  ${label}\n`);
+    return true;
+  }
+  failures += 1;
+  process.stdout.write(`  FAIL  ${label}${detail === undefined ? "" : ` (${detail})`}\n`);
+  return false;
+}
+
 const children = [];
 
-function assert(condition, message) {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function reservePorts(n) {
-  return new Promise((resolve, reject) => {
-    const servers = [];
-    let opened = 0;
-    for (let i = 0; i < n; i += 1) {
-      const server = net.createServer();
-      servers.push(server);
-      server.once('error', reject);
-      server.listen(0, '127.0.0.1', () => {
-        opened += 1;
-        if (opened === n) {
-          const ports = servers.map((item) => item.address().port);
-          let closed = 0;
-          for (const item of servers) {
-            item.close(() => {
-              closed += 1;
-              if (closed === n) {
-                resolve(ports);
-              }
-            });
-          }
-        }
-      });
-    }
-  });
-}
-
-function spawnLogged(command, args, options) {
-  const child = spawn(command, args, {
-    ...options,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stdoutBuf = '';
-  child.stderrBuf = '';
-  child.stdout.on('data', (chunk) => {
-    child.stdoutBuf += chunk;
-  });
-  child.stderr.on('data', (chunk) => {
-    child.stderrBuf += chunk;
-  });
-  child.on('exit', (code, signal) => {
-    child.exitCode = code;
-    child.exitSignal = signal;
-  });
+function launch(command, args, options = {}) {
+  const child = spawn(command, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"], ...options });
   children.push(child);
   return child;
 }
 
-function killChildren() {
+function shutdown() {
   for (const child of children) {
-    if (child.exitCode != null || child.killed) {
-      continue;
-    }
-    try {
-      child.kill('SIGTERM');
-    } catch {
-    }
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
   }
 }
 
-process.on('exit', killChildren);
-process.on('SIGINT', () => {
-  killChildren();
-  process.exit(1);
-});
-process.on('SIGTERM', () => {
-  killChildren();
-  process.exit(1);
+process.on("exit", shutdown);
+process.on("SIGINT", () => {
+  shutdown();
+  process.exit(130);
 });
 
-function baseEnv() {
-  const env = { ...process.env };
-  delete env.AI_GATEWAY_API_KEY;
-  delete env.AI_GATEWAY_URL;
-  delete env.LIVE_JUDGE_DEMO;
-  delete env.STATIC_DIR;
-  return env;
-}
-
-async function waitForHealth(port, child, timeoutMs = 20000) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    if (child.exitCode != null) {
-      throw new Error(
-        `server on ${port} exited ${child.exitCode}\n${child.stderrBuf}\n${child.stdoutBuf}`,
-      );
-    }
+async function waitForHttp(url, child, label) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) throw new Error(`${label} exited early with code ${child.exitCode}`);
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`);
-      if (response.ok) {
-        const body = await response.json();
-        if (body.ok === true) {
-          return;
-        }
-      }
+      await fetch(url, { signal: AbortSignal.timeout(1000) });
+      return;
     } catch {
-    }
-    await delay(50);
-  }
-  throw new Error(
-    `timed out waiting for health on ${port}\n${child.stderrBuf}\n${child.stdoutBuf}`,
-  );
-}
-
-async function waitForStub(port, child, timeoutMs = 10000) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    if (child.exitCode != null) {
-      throw new Error(`stub exited ${child.exitCode}\n${child.stderrBuf}`);
-    }
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/v1/evaluate`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: '{}',
-      });
-      if (response.status === 401) {
-        return;
-      }
-    } catch {
-    }
-    await delay(50);
-  }
-  throw new Error(`timed out waiting for stub on ${port}\n${child.stderrBuf}`);
-}
-
-async function getJson(port, pathname) {
-  const response = await fetch(`http://127.0.0.1:${port}${pathname}`);
-  const body = await response.json();
-  return { status: response.status, body };
-}
-
-async function postJudge(port, payload) {
-  const response = await fetch(`http://127.0.0.1:${port}/api/judge`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: typeof payload === 'string' ? payload : JSON.stringify(payload),
-  });
-  const body = await response.json();
-  return { status: response.status, body };
-}
-
-function collectCriteria(node, out = []) {
-  if (Array.isArray(node)) {
-    for (const item of node) {
-      collectCriteria(item, out);
-    }
-    return out;
-  }
-  if (node && typeof node === 'object') {
-    if (typeof node.id === 'string' && typeof node.kind === 'string') {
-      out.push(node);
-    }
-    for (const value of Object.values(node)) {
-      collectCriteria(value, out);
+      await new Promise((r) => setTimeout(r, 200));
     }
   }
-  return out;
+  throw new Error(`${label} did not become reachable at ${url}`);
 }
 
-function inUnitInterval(value) {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
-}
-
-async function main() {
-  const build = spawnSync('cargo', ['build'], {
-    cwd: serverDir,
-    stdio: 'inherit',
-  });
-  if (build.status !== 0) {
-    throw new Error('cargo build failed');
-  }
-  const bin = path.join(serverDir, 'target', 'debug', 'live-judge-server');
-  const [stubPort, livePort, demoPort, wrongPort, unreachPort, closedPort] =
-    await reservePorts(6);
-
-  const stub = spawnLogged(process.execPath, [stubPath], {
-    env: { ...process.env, PORT: String(stubPort) },
-  });
-  await waitForStub(stubPort, stub);
-
-  const live = spawnLogged(bin, [], {
+async function startServer(env) {
+  const server = launch(resolve(root, "server/target/debug/live-judge-server"), [], {
     env: {
-      ...baseEnv(),
-      PORT: String(livePort),
-      AI_GATEWAY_URL: `http://127.0.0.1:${stubPort}`,
-      AI_GATEWAY_API_KEY: 'test-key',
-      RUST_LOG: 'error',
+      ...process.env,
+      LIVE_JUDGE_ADDR: `127.0.0.1:${SERVER_PORT}`,
+      AI_GATEWAY_BASE_URL: `http://127.0.0.1:${STUB_PORT}`,
+      RUST_LOG: "live_judge_server=info",
+      WEB_DIST: "web/dist",
+      ...env,
     },
   });
-  const demo = spawnLogged(bin, [], {
-    env: {
-      ...baseEnv(),
-      PORT: String(demoPort),
-      RUST_LOG: 'error',
-    },
+  let log = "";
+  server.stdout.on("data", (d) => {
+    log += d;
   });
-  const wrong = spawnLogged(bin, [], {
-    env: {
-      ...baseEnv(),
-      PORT: String(wrongPort),
-      AI_GATEWAY_URL: `http://127.0.0.1:${stubPort}`,
-      AI_GATEWAY_API_KEY: 'wrong-key',
-      RUST_LOG: 'error',
-    },
+  server.stderr.on("data", (d) => {
+    log += d;
   });
-  const unreachable = spawnLogged(bin, [], {
-    env: {
-      ...baseEnv(),
-      PORT: String(unreachPort),
-      AI_GATEWAY_URL: `http://127.0.0.1:${closedPort}`,
-      AI_GATEWAY_API_KEY: 'test-key',
-      RUST_LOG: 'error',
+  await waitForHttp(`${BASE}/api/criteria`, server, "server");
+  return {
+    server,
+    log: () => log,
+    async stop() {
+      server.kill("SIGTERM");
+      await once(server, "exit");
     },
-  });
-
-  await Promise.all([
-    waitForHealth(livePort, live),
-    waitForHealth(demoPort, demo),
-    waitForHealth(wrongPort, wrong),
-    waitForHealth(unreachPort, unreachable),
-  ]);
-
-  const health = await getJson(livePort, '/health');
-  assert(health.status === 200, `health status ${health.status}`);
-  assert(health.body.ok === true, `health body ${JSON.stringify(health.body)}`);
-  console.log('ok health');
-
-  const criteria = await getJson(livePort, '/api/criteria');
-  assert(criteria.status === 200, `criteria status ${criteria.status}`);
-  const listed = collectCriteria(criteria.body);
-  const byId = Object.fromEntries(listed.map((item) => [item.id, item]));
-  assert(byId.positivity?.kind === 'boolean', 'criteria missing positivity boolean');
-  assert(byId.intensity?.kind === 'score', 'criteria missing intensity score');
-  assert(byId.stance?.kind === 'choice', 'criteria missing stance choice');
-  console.log('ok criteria');
-
-  const liveJudge = await postJudge(livePort, { text: '今日はいい天気だね。' });
-  assert(liveJudge.status === 200, `live status ${liveJudge.status} ${JSON.stringify(liveJudge.body)}`);
-  assert(liveJudge.body.source === 'live', `live source ${liveJudge.body.source}`);
-  const liveCriteria = liveJudge.body.criteria;
-  assert(Array.isArray(liveCriteria) && liveCriteria.length === 3, 'live expected three criteria');
-  const liveById = Object.fromEntries(liveCriteria.map((item) => [item.id, item]));
-  assert(liveById.positivity?.kind === 'boolean', 'live positivity kind');
-  assert(liveById.intensity?.kind === 'score', 'live intensity kind');
-  assert(liveById.stance?.kind === 'choice', 'live stance kind');
-  for (const item of liveCriteria) {
-    assert(inUnitInterval(item.confidence), `${item.id} confidence ${item.confidence}`);
-  }
-  assert(
-    inUnitInterval(liveById.positivity.probability),
-    `boolean probability ${liveById.positivity.probability}`,
-  );
-  console.log('ok live-via-stub');
-
-  const unreachableJudge = await postJudge(unreachPort, { text: '今日はいい天気だね。' });
-  assert(
-    unreachableJudge.status === 502,
-    `unreachable status ${unreachableJudge.status} ${JSON.stringify(unreachableJudge.body)}`,
-  );
-  const unreachableCode = unreachableJudge.body?.error?.code;
-  assert(
-    unreachableCode === 'gateway_unreachable' || unreachableCode === 'gateway_error',
-    `unreachable code ${unreachableCode}`,
-  );
-  console.log('ok unreachable-gateway');
-
-  const empty = await postJudge(livePort, { text: '' });
-  assert(empty.status === 400, `empty status ${empty.status}`);
-  assert(empty.body?.error?.code === 'empty_text', `empty code ${empty.body?.error?.code}`);
-  const whitespace = await postJudge(livePort, { text: ' \n\t ' });
-  assert(whitespace.status === 400, `whitespace status ${whitespace.status}`);
-  assert(
-    whitespace.body?.error?.code === 'empty_text',
-    `whitespace code ${whitespace.body?.error?.code}`,
-  );
-  console.log('ok empty-text');
-
-  const tooLong = await postJudge(livePort, { text: 'あ'.repeat(4001) });
-  assert(tooLong.status === 400, `too-long status ${tooLong.status}`);
-  assert(
-    tooLong.body?.error?.code === 'text_too_long',
-    `too-long code ${tooLong.body?.error?.code}`,
-  );
-  console.log('ok text-too-long');
-
-  const sample = { text: '同じ文を二度判定する。' };
-  const demoFirst = await postJudge(demoPort, sample);
-  const demoSecond = await postJudge(demoPort, sample);
-  assert(demoFirst.status === 200, `demo first ${demoFirst.status} ${JSON.stringify(demoFirst.body)}`);
-  assert(demoSecond.status === 200, `demo second ${demoSecond.status}`);
-  assert(demoFirst.body.source === 'demo', `demo first source ${demoFirst.body.source}`);
-  assert(demoSecond.body.source === 'demo', `demo second source ${demoSecond.body.source}`);
-  assert(
-    JSON.stringify(demoFirst.body) === JSON.stringify(demoSecond.body),
-    'demo responses were not equal',
-  );
-  console.log('ok demo-determinism');
-
-  const unauthorized = await postJudge(wrongPort, { text: '今日はいい天気だね。' });
-  assert(
-    unauthorized.status === 502,
-    `wrong-key status ${unauthorized.status} ${JSON.stringify(unauthorized.body)}`,
-  );
-  assert(
-    unauthorized.body?.error?.code === 'gateway_error',
-    `wrong-key code ${unauthorized.body?.error?.code}`,
-  );
-  console.log('ok stub-401');
-
-  console.log('all passed');
+  };
 }
 
-main()
-  .catch((err) => {
-    console.error(err.stack || err.message);
-    process.exitCode = 1;
-  })
-  .finally(() => {
-    killChildren();
+async function judge(text) {
+  const response = await fetch(`${BASE}/api/judge`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text }),
   });
+  return { status: response.status, body: await response.json() };
+}
+
+function isWiredCriterion(c) {
+  return hasCopy(c) && hasHue(c) && hasPrompt(c);
+}
+
+function hasCopy(c) {
+  return typeof c.id === "string" && typeof c.label === "string" && typeof c.blurb === "string";
+}
+
+function hasHue(c) {
+  return Number.isInteger(c.hue) && c.hue >= 0 && c.hue < 360;
+}
+
+function hasPrompt(c) {
+  return ["boolean", "score", "choice"].includes(c.prompt?.type);
+}
+
+function isProbability(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+process.stdout.write("building server\n");
+const build = launch("cargo", ["build"], { cwd: resolve(root, "server"), stdio: "inherit" });
+const [buildCode] = await once(build, "exit");
+if (buildCode !== 0) {
+  process.stderr.write("cargo build failed\n");
+  process.exit(1);
+}
+
+process.stdout.write("starting stub gateway\n");
+const stub = launch("node", [resolve(root, "scripts/stub-gateway.mjs")], {
+  env: { ...process.env, STUB_PORT: String(STUB_PORT) },
+});
+await waitForHttp(`http://127.0.0.1:${STUB_PORT}/v1/evaluate`, stub, "stub gateway");
+
+process.stdout.write("\nlive path (stub gateway, key set)\n");
+let running = await startServer({ AI_GATEWAY_API_KEY: "stub-key" });
+
+const criteriaResponse = await fetch(`${BASE}/api/criteria`);
+const { criteria } = await criteriaResponse.json();
+check("GET /api/criteria returns 200", criteriaResponse.status === 200, criteriaResponse.status);
+check("registry is non-empty", Array.isArray(criteria) && criteria.length > 0, criteria?.length);
+check("every criterion carries id, label, blurb, hue and prompt", criteria.every(isWiredCriterion));
+check(
+  "all three prompt types are exercised",
+  new Set(criteria.map((c) => c.prompt.type)).size === 3,
+  [...new Set(criteria.map((c) => c.prompt.type))].join(","),
+);
+check(
+  "no criterion carries a visual field (the prompt type selects the panel)",
+  criteria.every((c) => c.visual === undefined),
+);
+
+const live = await judge(SAMPLE);
+check("POST /api/judge returns 200", live.status === 200, live.status);
+check("source is live", live.body.source === "live", live.body.source);
+check("usage is reported", typeof live.body.usage?.inputTokens === "number");
+check("elapsedMs is reported", typeof live.body.elapsedMs === "number" && live.body.elapsedMs >= 1, live.body.elapsedMs);
+check(
+  "every criterion received a verdict",
+  criteria.every((c) => live.body.verdicts?.[c.id] !== undefined),
+  Object.keys(live.body.verdicts ?? {}).join(","),
+);
+check(
+  "verdict type matches its criterion's prompt type",
+  criteria.every((c) => live.body.verdicts[c.id]?.type === c.prompt.type),
+);
+check(
+  "every certainty is a probability",
+  Object.values(live.body.verdicts ?? {}).every((v) => isProbability(v.certainty)),
+  JSON.stringify(Object.fromEntries(Object.entries(live.body.verdicts ?? {}).map(([k, v]) => [k, v.certainty]))),
+);
+
+const scoreCriterion = criteria.find((c) => c.prompt.type === "score");
+const scoreVerdict = live.body.verdicts[scoreCriterion.id];
+check(
+  "score distribution is dense and level-indexed",
+  Array.isArray(scoreVerdict.distribution) && scoreVerdict.distribution.length === scoreCriterion.prompt.levels.length,
+  `${scoreVerdict.distribution?.length} vs ${scoreCriterion.prompt.levels.length}`,
+);
+check(
+  "score sits inside the zero-indexed rubric range",
+  scoreVerdict.score >= 0 && scoreVerdict.score <= scoreCriterion.prompt.levels.length - 1,
+  scoreVerdict.score,
+);
+
+const choiceCriterion = criteria.find((c) => c.prompt.type === "choice");
+const choiceVerdict = live.body.verdicts[choiceCriterion.id];
+check(
+  "chosen option is one the registry declared",
+  choiceCriterion.prompt.options.some((o) => o.key === choiceVerdict.choice),
+  choiceVerdict.choice,
+);
+check(
+  "chosen option holds the highest probability",
+  !choiceVerdict.distribution ||
+    Object.values(choiceVerdict.distribution).every((p) => p <= choiceVerdict.distribution[choiceVerdict.choice]),
+  JSON.stringify(choiceVerdict.distribution),
+);
+
+const empty = await judge("   ");
+check("whitespace-only text is rejected", empty.status === 400, empty.status);
+check("rejection names its kind", empty.body.error?.kind === "empty_text", JSON.stringify(empty.body));
+
+const tooLong = await judge("あ".repeat(2001));
+check("over-long text is rejected", tooLong.status === 400, tooLong.status);
+check("rejection names its kind", tooLong.body.error?.kind === "text_too_long", JSON.stringify(tooLong.body));
+
+await running.stop();
+
+process.stdout.write("\ngateway failure path (nothing listening)\n");
+running = await startServer({
+  AI_GATEWAY_API_KEY: "stub-key",
+  AI_GATEWAY_BASE_URL: "http://127.0.0.1:8798",
+});
+const unreachable = await judge(SAMPLE);
+check("unreachable gateway is a 502", unreachable.status === 502, unreachable.status);
+check(
+  "failure names its kind",
+  unreachable.body.error?.kind === "gateway_unavailable",
+  JSON.stringify(unreachable.body),
+);
+check(
+  "failure carries no verdicts",
+  unreachable.body.verdicts === undefined,
+  JSON.stringify(unreachable.body.verdicts),
+);
+await running.stop();
+
+process.stdout.write("\ndemo path (no key)\n");
+running = await startServer({ AI_GATEWAY_API_KEY: "" });
+const demo = await judge(SAMPLE);
+check("POST /api/judge returns 200", demo.status === 200, demo.status);
+check("source is demo", demo.body.source === "demo", demo.body.source);
+check("elapsedMs is at least 1 ms", typeof demo.body.elapsedMs === "number" && demo.body.elapsedMs >= 1, demo.body.elapsedMs);
+check("usage is null in demo mode", demo.body.usage === null, JSON.stringify(demo.body.usage));
+check(
+  "every criterion still received a verdict",
+  criteria.every((c) => demo.body.verdicts?.[c.id] !== undefined),
+);
+check(
+  "every certainty is a probability",
+  Object.values(demo.body.verdicts ?? {}).every((v) => isProbability(v.certainty)),
+);
+
+const repeat = await judge(SAMPLE);
+check(
+  "demo verdicts are deterministic for identical text",
+  JSON.stringify(repeat.body.verdicts) === JSON.stringify(demo.body.verdicts),
+);
+
+const different = await judge("正直これはしんどい");
+check(
+  "demo verdicts change with the text",
+  JSON.stringify(different.body.verdicts) !== JSON.stringify(demo.body.verdicts),
+);
+
+await running.stop();
+
+process.stdout.write(`\n${checks - failures}/${checks} checks passed\n`);
+process.exit(failures === 0 ? 0 : 1);
