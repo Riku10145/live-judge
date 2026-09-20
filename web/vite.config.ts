@@ -2,11 +2,12 @@ import { defineConfig } from "vite-plus";
 
 export default defineConfig({
   server: {
-    host: true,
     proxy: {
-      "/api": "http://127.0.0.1:8080",
-      "/health": "http://127.0.0.1:8080",
+      "/api": "http://127.0.0.1:8787",
     },
+  },
+  test: {
+    include: ["src/**/*.test.ts"],
   },
   fmt: {},
   lint: {
