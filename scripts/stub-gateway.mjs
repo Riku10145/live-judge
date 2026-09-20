@@ -1,12 +1,8 @@
-// Stands in for https://ai-gateway.vercel.sh so the live request path can be
-// exercised without a real key. It answers whatever questions it is asked,
-// so it keeps working as criteria are added to the registry.
 import { createServer } from "node:http";
 
 const PORT = Number(process.env.STUB_PORT ?? 8799);
 
-// Deterministic per question id, so verify.mjs can assert literal values.
-function hash(text) {
+function unitInterval(text) {
   let h = 2166136261;
   for (let i = 0; i < text.length; i += 1) {
     h ^= text.charCodeAt(i);
@@ -27,14 +23,14 @@ function answerFor(id, question) {
 }
 
 function booleanAnswer(id) {
-  return { type: "boolean", probability: round2(0.05 + hash(id) * 0.9) };
+  return { type: "boolean", probability: round2(0.05 + unitInterval(id) * 0.9) };
 }
 
 function scoreAnswer(id, levels) {
   const weights = [];
   let total = 0;
   for (let i = 0; i < levels; i += 1) {
-    const weight = round2(hash(`${id}:${i}`));
+    const weight = round2(unitInterval(`${id}:${i}`));
     weights.push(weight);
     total += weight;
   }
@@ -51,7 +47,7 @@ function choiceAnswer(id, keys) {
   const weights = {};
   let total = 0;
   for (const key of keys) {
-    weights[key] = round2(hash(`${id}:${key}`));
+    weights[key] = round2(unitInterval(`${id}:${key}`));
     total += weights[key];
   }
   const probabilities = {};
@@ -105,7 +101,7 @@ function confidenceOf(request) {
 function addConfidence(confidence, id, question) {
   if (question.type === "boolean") return;
   if (!answerFor(id, question)) return;
-  confidence[id] = round2(0.3 + hash(`c:${id}`) * 0.65);
+  confidence[id] = round2(0.3 + unitInterval(`c:${id}`) * 0.65);
 }
 
 const server = createServer((req, res) => {

@@ -52,19 +52,20 @@ impl Config {
     }
 }
 
-/// `cargo run` from `server/` still needs to find a frontend built at the
-/// repository root. Prefer the path the environment named; if that directory
-/// is missing, try the other common layout before giving up.
+fn crate_web_dist() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/dist")
+}
+
 fn resolve_web_dist(raw: Option<String>) -> PathBuf {
     let preferred = raw
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("web/dist"));
+        .unwrap_or_else(crate_web_dist);
     if preferred.is_dir() {
         return preferred;
     }
-    let from_crate = PathBuf::from("../web/dist");
+    let from_crate = crate_web_dist();
     if from_crate.is_dir() {
         return from_crate;
     }
@@ -78,10 +79,11 @@ mod tests {
     #[test]
     fn a_missing_named_path_falls_back_to_the_crate_relative_build() {
         let resolved = resolve_web_dist(Some("web/dist".into()));
-        assert!(
-            resolved.ends_with("web/dist") || resolved.ends_with("../web/dist"),
-            "{resolved:?}"
-        );
+        if PathBuf::from("web/dist").is_dir() {
+            assert_eq!(resolved, PathBuf::from("web/dist"));
+        } else {
+            assert_eq!(resolved, crate_web_dist());
+        }
     }
 
     #[test]

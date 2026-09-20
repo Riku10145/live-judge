@@ -1,8 +1,5 @@
 use serde::{Serialize, Serializer};
 
-/// Add a judgment axis by appending one entry to [`CRITERIA`]. Nothing else in
-/// the server or the frontend needs to change, because [`Prompt`] alone selects
-/// the panel that renders the answer.
 pub struct Criterion {
     pub id: &'static str,
     pub label: &'static str,
@@ -24,9 +21,6 @@ pub struct Opt {
     pub criteria: &'static str,
 }
 
-/// The `instructions` and `criteria` text goes to jev. The labels go to the
-/// panel. They are separate because the model needs a description and the UI
-/// needs a chip.
 #[derive(Serialize)]
 #[serde(
     tag = "type",

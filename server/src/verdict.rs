@@ -4,8 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::criteria::{Criterion, Prompt};
 
-/// One jev answer, already parsed out of the gateway response. Demo mode
-/// produces the same type so both paths converge on [`to_verdict`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Answer {
@@ -60,10 +58,6 @@ pub struct AnswerMismatch {
     pub found: &'static str,
 }
 
-/// Concentration of a probability distribution, 0 for uniform and 1 for all
-/// mass on one outcome. Measured as the normalized Euclidean distance from
-/// uniform, which at two outcomes reduces exactly to `|2p - 1|`. That is why
-/// booleans need no separate rule.
 pub fn concentration(weights: &[f64]) -> f64 {
     let n = weights.len();
     if n <= 1 {

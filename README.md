@@ -102,9 +102,9 @@ cd web && vp install && vp build
 cd ../server && cargo run
 ```
 
-Open <http://127.0.0.1:8787>. If `WEB_DIST` points at a missing directory, the
-server also looks in `../web/dist`, so `cargo run` from `server/` still serves
-the build produced at the repository root.
+Open <http://127.0.0.1:8787>. If `WEB_DIST` is unset or that directory is
+missing, the server serves `web/dist` next to the crate, so `cargo run` from
+`server/` still finds the build at the repository root.
 
 ## Add a criterion
 

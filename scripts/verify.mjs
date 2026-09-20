@@ -1,9 +1,3 @@
-// End-to-end check of the Rust server against a stub AI Gateway.
-//
-//   node scripts/verify.mjs
-//
-// Proves the live request path (server -> gateway -> typed verdicts) and the
-// demo path, without a real API key. Exits non-zero on the first failure.
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
